@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>地图分区算法可视化 (Map Partitioner)</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: #1e293b;
+            --text-color: #f8fafc;
+            --accent: #38bdf8;
+            --accent2: #a78bfa;
+        }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg-color); color: var(--text-color); margin: 0; padding: 20px; display: flex; justify-content: center; }
+        .container { display: flex; gap: 20px; max-width: 1200px; width: 100%; }
+        .canvas-panel { flex: 2; background: var(--panel-bg); padding: 15px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); display: flex; flex-direction: column; align-items: center; }
+        .control-panel { flex: 1; background: var(--panel-bg); padding: 20px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); display: flex; flex-direction: column; gap: 15px; }
+        h2 { margin-top: 0; color: var(--accent); font-size: 1.2rem; border-bottom: 1px solid #334155; padding-bottom: 10px; }
+        canvas { background: #000; border-radius: 8px; image-rendering: pixelated; width: 100%; max-width: 600px; height: auto; aspect-ratio: 1/1; }
+        .step-desc { font-size: 0.9rem; color: #94a3b8; min-height: 60px; background: #0f172a; padding: 10px; border-radius: 6px; line-height: 1.4; }
+        button { background: var(--accent); color: #000; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px var(--accent); }
+        button:disabled { background: #475569; color: #94a3b8; cursor: not-allowed; transform: none; box-shadow: none; }
+        .param-group { display: flex; flex-direction: column; gap: 5px; font-size: 0.85rem; }
+        input { background: #0f172a; border: 1px solid #475569; color: var(--text-color); padding: 5px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="canvas-panel">
+            <canvas id="mapCanvas" width="200" height="200"></canvas>
+            <div class="step-desc" id="stepDesc">点击"生成地图"开始算法可视化演示。</div>
+            <div style="margin-top: 15px; display: flex; gap: 10px;">
+                <button id="btnGen" onclick="initMap()">生成地图</button>
+                <button id="btnNext" onclick="nextStep()" disabled>下一步</button>
+                <button id="btnAuto" onclick="autoPlay()" disabled>自动播放</button>
+            </div>
+        </div>
+        <div class="control-panel">
+            <h2>算法参数</h2>
+            <div class="param-group">
+                <label>膨胀半径: <span id="valInf">3</span></label>
+                <input type="range" id="rInf" min="1" max="6" value="3" oninput="document.getElementById('valInf').innerText=this.value">
+            </div>
+            <div class="param-group">
+                <label>最小面积: <span id="valArea">50</span></label>
+                <input type="range" id="rArea" min="10" max="200" value="50" oninput="document.getElementById('valArea').innerText=this.value">
+            </div>
+            <div class="param-group">
+                <label>合并阈值: <span id="valMerge">1.5</span></label>
+                <input type="range" id="rMerge" min="0.5" max="3" step="0.1" value="1.5" oninput="document.getElementById('valMerge').innerText=this.value">
+            </div>
+            <h2>状态监控</h2>
+            <div style="font-size: 0.85rem; background: #0f172a; padding: 10px; border-radius: 6px; line-height: 1.6;">
+                当前步骤: <span id="stStep" style="color:var(--accent)">0 / 5</span><br>
+                种子点数量: <span id="stSeeds" style="color:var(--accent2)">0</span><br>
+                初始区域数: <span id="stInitR" style="color:var(--accent2)">0</span><br>
+                最终区域数: <span id="stFinalR" style="color:var(--accent2)">0</span>
+            </div>
+        </div>
+    </div>
+
+<script>
+const canvas = document.getElementById('mapCanvas');
+const ctx = canvas.getContext('2d');
+const W = 200, H = 200;
+let grid = []; // 0:Free, 1:Occ
+let freeMask = [];
+let distMap = [];
+let seeds = [];
+let labels = [];
+let finalLabels = [];
+let centers = [];
+let home = {x: 100, y: 180};
+let currentStep = 0;
+let autoInterval = null;
+
+const DESC = [
+    "准备就绪。",
+    "Step 1: 预处理。对Free区域进行形态学膨胀，并通过连通域分析剔除与Home点(绿)不相通的区域。",
+    "Step 2: 寻找种子。蓝点为边界带采样，红点为距离变换(DistMap)的局部极大值(开阔区中心)。",
+    "Step 3: Voronoi分区。基于Watershed算法，将自由空间按最近种子点划分为初始区域。",
+    "Step 4: 区域优化。基于RAG图，合并面积过小或路径代价低的相邻区域，减少碎片化。",
+    "Step 5: 提取中心。计算各区域质心，通过A*验证其从Home点的可达性(红叉为最终可达点)。"
+];
+
+function initMap() {
+    clearInterval(autoInterval);
+    currentStep = 0;
+    grid = Array.from({length: H}, () => Array(W).fill(0));
+    freeMask = Array.from({length: H}, () => Array(W).fill(0));
+    distMap = Array.from({length: H}, () => Array(W).fill(0));
+    labels = Array.from({length: H}, () => Array(W).fill(0));
+    finalLabels = Array.from({length: H}, () => Array(W).fill(0));
+    seeds = []; centers = [];
+
+    // 随机生成障碍物
+    for(let i=0; i<15; i++) {
+        let rx = Math.floor(Math.random()*W); let ry = Math.floor(Math.random()*H);
+        let rw = 10 + Math.floor(Math.random()*40); let rh = 10 + Math.floor(Math.random()*40);
+        for(let y=ry; y<Math.min(H, ry+rh); y++) for(let x=rx; x<Math.min(W, rx+rw); x++) grid[y][x] = 1;
+    }
+    // 边界
+    for(let y=0; y<H; y++) { grid[y][0]=1; grid[y][W-1]=1; }
+    for(let x=0; x<W; x++) { grid[0][x]=1; grid[H-1][x]=1; }
+    // 确保Home点自由
+    for(let y=home.y-2; y<=home.y+2; y++) for(let x=home.x-2; x<=home.x+2; x++) if(y>0&&y<H&&x>0&&x<W) grid[y][x]=0;
+
+    drawBase();
+    updateUI();
+    document.getElementById('btnNext').disabled = false;
+    document.getElementById('btnAuto').disabled = false;
+}
+
+function drawBase() {
+    let imgData = ctx.createImageData(W, H);
+    for(let y=0; y<H; y++) for(let x=0; x<W; x++) {
+        let i = (y*W+x)*4;
+        if(grid[y][x]===1) { imgData.data[i]=50; imgData.data[i+1]=50; imgData.data[i+2]=50; } // Occ
+        else { imgData.data[i]=240; imgData.data[i+1]=240; imgData.data[i+2]=240; } // Free
+        imgData.data[i+3]=255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    ctx.fillStyle = '#00ff00'; ctx.beginPath(); ctx.arc(home.x, home.y, 3, 0, Math.PI*2); ctx.fill();
+}
+
+function nextStep() {
+    currentStep++;
+    if(currentStep > 5) currentStep = 5;
+    
+    if(currentStep === 1) runStep1();
+    else if(currentStep === 2) runStep2();
+    else if(currentStep === 3) runStep3();
+    else if(currentStep === 4) runStep4();
+    else if(currentStep === 5) runStep5();
+
+    updateUI();
+    if(currentStep === 5) {
+        document.getElementById('btnNext').disabled = true;
+        clearInterval(autoInterval);
+    }
+}
+
+function autoPlay() { if(autoInterval) clearInterval(autoInterval); autoInterval = setInterval(nextStep, 1500); }
+
+function updateUI() {
+    document.getElementById('stepDesc').innerText = DESC[currentStep];
+    document.getElementById('stStep').innerText = `${currentStep} / 5`;
+    document.getElementById('stSeeds').innerText = seeds.length;
+    document.getElementById('stInitR').innerText = labels.flat().filter(x=>x>0).length > 0 ? Math.max(...labels.flat()) : 0;
+    document.getElementById('stFinalR').innerText = finalLabels.flat().filter(x=>x>0).length > 0 ? Math.max(...finalLabels.flat()) : 0;
+}
+
+// --- 简化的算法模拟实现 ---
+function runStep1() {
+    let inf = parseInt(document.getElementById('rInf').value);
+    // 模拟膨胀和CCL
+    let tempMask = grid.map(r=>[...r]);
+    for(let y=inf; y<H-inf; y++) for(let x=inf; x<W-inf; x++) {
+        if(grid[y][x]===1) continue;
+        let blocked = false;
+        for(let dy=-inf; dy<=inf && !blocked; dy++) for(let dx=-inf; dx<=inf && !blocked; dx++) if(grid[y+dy][x+dx]===1) blocked=true;
+        if(blocked) tempMask[y][x] = 1;
+    }
+    // BFS提取Home连通域
+    let visited = Array.from({length: H}, ()=>Array(W).fill(false));
+    let q = [home]; visited[home.y][home.x] = true; freeMask = Array.from({length: H}, ()=>Array(W).fill(0));
+    while(q.length) {
+        let {x, y} = q.shift();
+        freeMask[y][x] = 1;
+        [[0,1],[0,-1],[1,0],[-1,0]].forEach(([dy,dx]) => {
+            let ny=y+dy, nx=x+dx;
+            if(ny>=0&&ny<H&&nx>=0&&nx<W&&!visited[ny][nx]&&tempMask[ny][nx]===0) { visited[ny][nx]=true; q.push({x:nx, y:ny}); }
+        });
+    }
+    let imgData = ctx.createImageData(W, H);
+    for(let y=0; y<H; y++) for(let x=0; x<W; x++) {
+        let i = (y*W+x)*4;
+        if(freeMask[y][x]===1) { imgData.data[i]=200; imgData.data[i+1]=230; imgData.data[i+2]=255; } // Safe Free
+        else if(grid[y][x]===0) { imgData.data[i]=100; imgData.data[i+1]=100; imgData.data[i+2]=100; } // Unreachable Free
+        else { imgData.data[i]=50; imgData.data[i+1]=50; imgData.data[i+2]=50; } // Occ
+        imgData.data[i+3]=255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    ctx.fillStyle = '#00ff00'; ctx.beginPath(); ctx.arc(home.x, home.y, 3, 0, Math.PI*2); ctx.fill();
+}
+
+function runStep2() {
+    // 简化距离变换 (BFS)
+    distMap = Array.from({length: H}, ()=>Array(W).fill(0));
+    let q = [];
+    for(let y=0; y<H; y++) for(let x=0; x<W; x++) if(freeMask[y][x]===1) {
+        let isBorder = false;
+        [[0,1],[0,-1],[1,0],[-1,0]].forEach(([dy,dx])=>{ let ny=y+dy, nx=x+dx; if(ny<0||ny>=H||nx<0||nx>=W||freeMask[ny][nx]===0) isBorder=true; });
+        if(isBorder) { distMap[y][x]=1; q.push({x,y}); }
+    }
+    while(q.length) {
+        let {x, y} = q.shift();
+        [[0,1],[0,-1],[1,0],[-1,0]].forEach(([dy,dx])=>{
+            let ny=y+dy, nx=x+dx;
+            if(ny>=0&&ny<H&&nx>=0&&nx<W&&freeMask[ny][nx]===1&&distMap[ny][nx]===0) {
+                distMap[ny][nx] = distMap[y][x] + 1; q.push({x:nx, y:ny});
+            }
+        });
+    }
+    // 找局部极大值 (峰值)
+    seeds = [];
+    for(let y=5; y<H-5; y+=10) for(let x=5; x<W-5; x+=10) {
+        if(freeMask[y][x]===0) continue;
+        let isMax = true;
+        for(let dy=-5; dy<=5; dy++) for(let dx=-5; dx<=5; dx++) {
+            if(distMap[y+dy][x+dx] > distMap[y][x]) isMax = false;
+        }
+        if(isMax && distMap[y][x] > 5) seeds.push({x, y, type:'peak'});
+    }
+    // 边界采样
+    for(let y=0; y<H; y+=8) for(let x=0; x<W; x+=8) {
+        if(freeMask[y][x]===1 && distMap[y][x] <= 2) seeds.push({x, y, type:'border'});
+    }
+
+    // 可视化距离图和种子
+    let maxDist = Math.max(...distMap.flat());
+    let imgData = ctx.createImageData(W, H);
+    for(let y=0; y<H; y++) for(let x=0; x<W; x++) {
+        let i = (y*W+x)*4;
+        if(freeMask[y][x]===1) { let c = Math.floor((distMap[y][x]/maxDist)*255); imgData.data[i]=0; imgData.data[i+1]=c; imgData.data[i+2]=0; }
+        else { imgData.data[i]=50; imgData.data[i+1]=50; imgData.data[i+2]=50; }
+        imgData.data[i+3]=255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    seeds.forEach(s => {
+        ctx.fillStyle = s.type==='peak' ? '#ff0000' : '#0088ff';
+        ctx.beginPath(); ctx.arc(s.x, s.y, 2, 0, Math.PI*2); ctx.fill();
+    });
+    ctx.fillStyle = '#00ff00'; ctx.beginPath(); ctx.arc(home.x, home.y, 3, 0, Math.PI*2); ctx.fill();
+}
+
+function runStep3() {
+    labels = Array.from({length: H}, ()=>Array(W).fill(0));
+    // Voronoi BFS洪泛填充
+    let q = [];
+    seeds.forEach((s, idx) => { labels[s.y][s.x] = idx+1; q.push({...s, id: idx+1}); });
+    while(q.length) {
+        let {x, y, id} = q.shift();
+        [[0,1],[0,-1],[1,0],[-1,0]].forEach(([dy,dx])=>{
+            let ny=y+dy, nx=x+dx;
+            if(ny>=0&&ny<H&&nx>=0&&nx<W&&freeMask[ny][nx]===1&&labels[ny][nx]===0) {
+                labels[ny][nx] = id; q.push({x:nx, y:ny, id});
+            }
+        });
+    }
+    drawLabels(labels);
+}
+
+function runStep4() {
+    finalLabels = labels.map(r=>[...r]);
+    let minArea = parseInt(document.getElementById('rArea').value);
+    // 统计面积
+    let areaCount = {};
+    for(let y=0; y<H; y++) for(let x=0; x<W; x++) if(finalLabels[y][x]>0) areaCount[finalLabels[y][x]] = (areaCount[finalLabels[y][x]]||0) + 1;
+    
+    // 简单合并小区域到相邻最大区域
+    let changed = true;
+    while(changed) {
+        changed = false;
+        let newAreaCount = {};
+        for(let y=0; y<H; y++) for(let x=0; x<W; x++) if(finalLabels[y][x]>0) newAreaCount[finalLabels[y][x]] = (newAreaCount[finalLabels[y][x]]||0) + 1;
+        
+        for(let id in newAreaCount) {
+            if(newAreaCount[id] < minArea) {
+                let neighbors = {};
+                let ly = parseInt(id), lx = parseInt(id); // dummy
+                for(let y=0; y<H; y++) for(let x=0; x<W; x++) {
+                    if(finalLabels[y][x] == id) {
+                        [[0,1],[0,-1],[1,0],[-1,0]].forEach(([dy,dx])=>{
+                            let nId = finalLabels[y+dy]?.[x+dx];
+                            if(nId && nId != id) neighbors[nId] = (neighbors[nId]||0) + 1;
+                        });
+                    }
+                }
+                let maxN = Object.keys(neighbors).sort((a,b) => neighbors[b]-neighbors[a])[0];
+                if(maxN) {
+                    for(let y=0; y<H; y++) for(let x=0; x<W; x++) if(finalLabels[y][x]==id) finalLabels[y][x] = parseInt(maxN);
+                    changed = true; break;
+                }
+            }
+        }
+    }
+    drawLabels(finalLabels);
+}
+
+function runStep5() {
+    centers = [];
+    let regionPixels = {};
+    for(let y=0; y<H; y++) for(let x=0; x<W; x++) {
+        let id = finalLabels[y][x];
+        if(id>0) { if(!regionPixels[id]) regionPixels[id]=[]; regionPixels[id].push({x,y}); }
+    }
+    
+    for(let id in regionPixels) {
+        let pxs = regionPixels[id];
+        let cx = Math.floor(pxs.reduce((s,p)=>s+p.x, 0)/pxs.length);
+        let cy = Math.floor(pxs.reduce((s,p)=>s+p.y, 0)/pxs.length);
+        // 简化可达性：如果在自由空间内就认为是可达的
+        if(freeMask[cy][cx]===1) centers.push({x:cx, y:cy, id});
+    }
+
+    drawLabels(finalLabels);
+    centers.forEach(c => {
+        ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(c.x-5, c.y); ctx.lineTo(c.x+5, c.y); ctx.moveTo(c.x, c.y-5); ctx.lineTo(c.x, c.y+5); ctx.stroke();
+    });
+}
+
+function drawLabels(lb) {
+    let maxId = Math.max(...lb.flat());
+    // 生成随机颜色
+    let colors = {}; colors[0] = {r:50,g:50,b:50};
+    for(let i=1; i<=maxId; i++) colors[i] = { r: Math.floor(Math.random()*200+55), g: Math.floor(Math.random()*200+55), b: Math.floor(Math.random()*200+55) };
+    
+    let imgData = ctx.createImageData(W, H);
+    for(let y=0; y<H; y++) for(let x=0; x<W; x++) {
+        let i = (y*W+x)*4;
+        let c = colors[lb[y][x]] || colors[0];
+        imgData.data[i]=c.r; imgData.data[i+1]=c.g; imgData.data[i+2]=c.b; imgData.data[i+3]=255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    ctx.fillStyle = '#00ff00'; ctx.beginPath(); ctx.arc(home.x, home.y, 3, 0, Math.PI*2); ctx.fill();
+}
+
+initMap();
+</script>
+</body>
+</html>
