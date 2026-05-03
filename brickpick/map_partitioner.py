@@ -125,9 +125,6 @@ class MapPartitioner:
         """
         第二步：潜在积木区域预测 (寻找种子点)
         
-        核心设计理念变更：
-        1. 【删除边界采样】边界积木交由最近的开阔中心点处理，超范围的自然舍弃。
-        2. 【物理尺度换算】废弃硬编码像素，改用真实物理距离(米)驱动。
         """
         print("Step 2: Finding seed points...")
         
@@ -135,15 +132,14 @@ class MapPartitioner:
         if not hasattr(self, 'resolution') or self.resolution <= 0:
             raise ValueError("Map resolution not found. Did step1 run correctly?")
             
-        # 【关键修改1】将物理距离(米)转换为像素距离
-        # phys_peak_distance=1.2 意味着：两个区域中心点物理距离至少相隔 1.2 米
+        
         min_dist_pixels = int(phys_peak_distance / self.resolution)
         
         # 距离变换 (到障碍物的距离)
         dist_map = ndimage.distance_transform_edt(self.free_mask)
         self.dist_map = dist_map
         
-        # 【关键修改2】仅保留开阔区域中心点 (局部极大值点)
+        
         from skimage.feature import peak_local_max
         peaks = peak_local_max(
             dist_map, 
@@ -152,9 +148,7 @@ class MapPartitioner:
             exclude_border=False # 允许在地图边缘出现种子
         )
         
-        # 【关键修改3】直接抛弃原有的 boundary_seeds 逻辑
-        # 原因：障碍物边缘的种子会强行撕裂大区域，产生大量碎片区域。
-        # 策略：让后续的 Voronoi 自然把边缘划分给大区域中心。
+        
         
         self.seeds = peaks
         print(f"  -> Physical min distance: {phys_peak_distance}m ({min_dist_pixels} px)")
@@ -402,6 +396,60 @@ class MapPartitioner:
                 f.write(f"{wx:.3f} {wy:.3f}\n")
                 
         print("Done!")
+
+import matplotlib.pyplot as plt
+
+def visualize_step2_details(self, phys_peak_distance=0.6):
+    """
+    专门可视化 Step 2 的内部逻辑：距离变换与峰值检测
+    """
+    print("Visualizing Step 2 details...")
+    
+    # 重新计算（确保数据最新）
+    min_dist_pixels = int(phys_peak_distance / self.resolution)
+    dist_map = ndimage.distance_transform_edt(self.free_mask)
+    
+    from skimage.feature import peak_local_max
+    peaks = peak_local_max(
+        dist_map, 
+        min_distance=min_dist_pixels, 
+        labels=self.free_mask,
+        exclude_border=False
+    )
+
+    # 开始绘图
+    plt.figure(figsize=(18, 5))
+
+    # 子图1：原始自由空间 (Binary Mask)
+    plt.subplot(131)
+    plt.title(f"1. Reachable Free Space\n(Input for Step 2)")
+    plt.imshow(self.free_mask, cmap='gray')
+    plt.axis('off')
+
+    # 子图2：距离变换图 (Distance Transform)
+    # 颜色越亮表示离墙越远，就像地形图上的“山峰”
+    
+    plt.subplot(132)
+    plt.title(f"2. Distance Transform\n(The 'Mountain' Map)")
+    im2 = plt.imshow(dist_map, cmap='viridis')
+    plt.colorbar(im2, fraction=0.046, pad=0.04)
+    plt.axis('off')
+
+    # 子图3：检测到的峰值 (Seeds)
+    plt.subplot(133)
+    plt.title(f"3. Local Maxima Extracted\n(Seeds, dist={phys_peak_distance}m)")
+    plt.imshow(dist_map, cmap='magma')
+    # 画出种子点，注意坐标是 (row, col) 对应 (y, x)
+    plt.plot(peaks[:, 1], peaks[:, 0], 'r.', markersize=8, label='Seeds')
+    plt.legend()
+    plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+# 在主程序中调用
+# partitioner.step1_preprocess(home_pixel=(80, 80))
+# visualize_step2_details(partitioner, phys_peak_distance=0.6)
 
 # ================= 测试用例 =================
 if __name__ == "__main__":
