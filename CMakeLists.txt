@@ -21,6 +21,7 @@ find_package(std_srvs REQUIRED)
 find_package(action_msgs REQUIRED)
 find_package(rcpputils REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
 # 安装 Python 脚本，使其可以通过 ros2 run 运行
 install(PROGRAMS
   brickpick/arm_preset_node.py
@@ -52,6 +53,7 @@ add_executable(bt_executor
   src/find_action.cpp
   src/approach_action.cpp
   src/arm_action.cpp
+  src/navigate_to_subregion_center.cpp
 )
 
 # 包含头文件目录（含 BT 和当前包）
@@ -69,6 +71,8 @@ ament_target_dependencies(bt_executor
   action_msgs
   behaviortree_cpp
   rcpputils
+  nav2_msgs
+  geometry_msgs
 )
 
 # 🔹 关键：链接行为树插件库（防止运行时找不到符号） 🔹
