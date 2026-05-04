@@ -22,6 +22,7 @@ find_package(action_msgs REQUIRED)
 find_package(rcpputils REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
 # 安装 Python 脚本，使其可以通过 ros2 run 运行
 install(PROGRAMS
   brickpick/arm_preset_node.py
@@ -66,6 +67,7 @@ target_include_directories(bt_executor PUBLIC
 # 链接库
 ament_target_dependencies(bt_executor
   rclcpp
+  rclcpp_action
   std_msgs
   std_srvs
   action_msgs

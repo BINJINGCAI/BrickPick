@@ -1,4 +1,4 @@
-#include "navigate_to_subregion_center.hpp"
+#include "brickpick/navigate_to_subregion_center.hpp"
 
 using namespace std::chrono_literals;
 
@@ -73,7 +73,7 @@ BT::NodeStatus NavigateToSubregionCenter::onRunning()
 
                     // 服务器已接受 Goal，保存 Handle 并获取结果 Future
                     active_goal_handle_ = handle;
-                    result_future_ = active_goal_handle_->async_get_result();
+                    result_future_ = client_->async_get_result(active_goal_handle_);
                     
                     // 流转至结果等待状态
                     state_ = NavState::WAITING_FOR_RESULT;

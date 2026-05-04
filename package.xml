@@ -19,6 +19,7 @@
   <depend>vision_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>nav2_msgs</depend>
+  <depend>rclcpp_action</depend>
     <!-- 🔹 新增：BehaviorTree 集成依赖 🔹 -->
   <depend>behaviortree_cpp</depend>
   <depend>std_srvs</depend>
