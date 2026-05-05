@@ -7,37 +7,32 @@ import sys
 import select
 import termios
 import tty
-import time
 
 msg = """
-Control Your Robomaster EP!
+Control Your Robomaster EP (TurtleBot3 Style)!
 ---------------------------
 Moving around:
-   q    w    e
-   a    s    d
-        x
+   w    x
+   a    d
+   q    e
 
-w/x : increase/decrease linear x speed (forward/backward)
-a/d : increase/decrease linear y speed (strafe left/right)
-q/e : increase/decrease angular z speed (rotate left/right)
+w/x : increase/decrease linear velocity (forward/backward)
+a/d : increase/decrease angular velocity (turn left/right)
+q/e : increase/decrease angular velocity (strafe left/right, if your robot supports it)
 
-s : stop
+s : force stop (reset speed to 0)
 
 CTRL-C to quit
 """
 
+# TurtleBot3 的精髓：按键不再是赋值，而是“步进增减”
 moveBindings = {
-    'w': (1, 0, 0),
-    'x': (-1, 0, 0),
-    'a': (0, 1, 0),
-    'd': (0, -1, 0),
-    'q': (0, 0, 1),
-    'e': (0, 0, -1),
-}
-
-speedBindings = {
-    'i': (1.1, 1.1),
-    'k': (.9, .9),
+    'w': (0.1, 0.0, 0.0),   # 按 w：线速度 +0.1
+    'x': (-0.1, 0.0, 0.0),  # 按 x：线速度 -0.1
+    'a': (0.0, 0.0, 0.1),   # 按 a：角速度 +0.1 (左转)
+    'd': (0.0, 0.0, -0.1),  # 按 d：角速度 -0.1 (右转)
+    'q': (0.0, 0.1, 0.0),   # 按 q：横向速度 +0.1 (左平移，麦克纳姆轮适用)
+    'e': (0.0, -0.1, 0.0),  # 按 e：横向速度 -0.1 (右平移)
 }
 
 def getKey(settings):
@@ -53,61 +48,63 @@ def getKey(settings):
 class TeleopKeyboardNode(Node):
     def __init__(self):
         super().__init__('teleop_keyboard_node')
-        self.publisher_ = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
         self.settings = termios.tcgetattr(sys.stdin)
         
-        self.speed = 0.2
-        self.turn = 0.5
-        self.x = 0.0
-        self.y = 0.0
-        self.th = 0.0
-        self.status = 0
-        self.last_twist = (0.0, 0.0, 0.0)
-        self.last_key_time = time.time()
-        self.key_timeout = 0.1  # 0.1 seconds timeout
+        # 初始状态：速度全部为 0
+        self.target_x = 0.0
+        self.target_y = 0.0
+        self.target_th = 0.0
+        
+        # 速度限制（防止手抖按太多把电机烧了）
+        self.max_speed = 1.0
+        self.max_turn = 2.0
 
+        # 0.1秒的心跳，保证持续发送指令，不让底盘超时停机
         self.timer = self.create_timer(0.1, self.run_loop)
         self.get_logger().info(msg)
 
     def run_loop(self):
         key = getKey(self.settings)
+        
         if key in moveBindings.keys():
-            self.x = moveBindings[key][0]
-            self.y = moveBindings[key][1]
-            self.th = moveBindings[key][2]
-            self.last_key_time = time.time()
+            # 核心：按键是增减，而不是覆盖
+            self.target_x += moveBindings[key][0]
+            self.target_y += moveBindings[key][1]
+            self.target_th += moveBindings[key][2]
+            
+            # 限幅处理 (clamp)
+            self.target_x = max(-self.max_speed, min(self.max_speed, self.target_x))
+            self.target_y = max(-self.max_speed, min(self.max_speed, self.target_y))
+            self.target_th = max(-self.max_turn, min(self.max_turn, self.target_th))
+            
+            # 实时打印当前目标速度
+            self.get_logger().info(f'Current Speed -> X:{self.target_x:.1f}, Y:{self.target_y:.1f}, Th:{self.target_th:.1f}')
+            
         elif key == 's':
-            self.x = 0.0
-            self.y = 0.0
-            self.th = 0.0
-            self.last_key_time = 0.0 # Force immediate stop
+            # 急停：一键归零
+            self.target_x = 0.0
+            self.target_y = 0.0
+            self.target_th = 0.0
+            self.get_logger().info('Robot forced stop.')
+            
         elif key == '\x03':  # CTRL-C
             self.destroy_node()
             rclpy.shutdown()
             sys.exit()
-        else:
-            # Check if we should stop due to timeout
-            if time.time() - self.last_key_time > self.key_timeout:
-                self.x = 0.0
-                self.y = 0.0
-                self.th = 0.0
+        
+        # 注意：这里没有 else 分支了！如果没按键，什么都不做，保持当前速度继续跑！
 
         twist = Twist()
-        twist.linear.x = self.x * self.speed
-        twist.linear.y = self.y * self.speed
+        twist.linear.x = self.target_x
+        twist.linear.y = self.target_y
         twist.linear.z = 0.0
         twist.angular.x = 0.0
         twist.angular.y = 0.0
-        twist.angular.z = self.th * self.turn
+        twist.angular.z = self.target_th
         
-        current_twist = (twist.linear.x, twist.linear.y, twist.angular.z)
-        if current_twist != self.last_twist:
-            if all(v == 0 for v in current_twist):
-                self.get_logger().info('Robot stopped.')
-            else:
-                self.get_logger().info(f'Moving: x={twist.linear.x:.2f}, y={twist.linear.y:.2f}, yaw={twist.angular.z:.2f}')
-            self.last_twist = current_twist
-        
+        # 【最关键】：发布必须在这里，和上面的逻辑平齐！
+        # 无论有没有按键，每 0.1 秒都必须把当前速度发出去
         self.publisher_.publish(twist)
 
 def main(args=None):
