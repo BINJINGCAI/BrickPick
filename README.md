@@ -1,3 +1,4 @@
 # Developing
 [See here](https://foremost-garage-64a.notion.site/33f3024d44438060a0d1fd7c040ab3d0?pvs=74)
 Now we are doing the job together!
+我在自己尝试着做这个项目，希望能和大家一起进步！
